@@ -1,0 +1,8 @@
+keys:
+  - &primary age12fzw8fwd3fvxeycx9fqvrh3438ej3dmwy3tkqt93cnj3h2ary43q7cylgk
+creation_rules:
+  - path_regex: secrets/.*\.env$
+    key_groups:
+      - age:
+        - *primary
+

@@ -1,0 +1,6 @@
+/target
+/Cargo.lcok
+/result
+/result-*
+.direnv/
+/rust-analyzer*
