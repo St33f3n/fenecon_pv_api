@@ -1,7 +1,8 @@
-/target
-/Cargo.lcok
-/flake.lock
-/result
-/result-*
+src/target
+target
+Cargo.lock
+flake.lock
+result
+result-*
 .direnv/
-/rust-analyzer*
+rust-analyzer*

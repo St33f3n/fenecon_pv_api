@@ -6,3 +6,7 @@ creation_rules:
       - age:
         - *primary
 
+  - path_regex: secrets/.*\.json$
+    key_groups:
+      - age:
+        - *primary

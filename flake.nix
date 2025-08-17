@@ -188,7 +188,7 @@
             RUST_LOG = "debug";
 
             # Für bessere Performance in dev
-            CARGO_BUILD_JOBS = "8";
+            CARGO_BUILD_JOBS = "32";
             CARGO_TARGET_DIR = "target";
 
             # Editor integration
@@ -221,11 +221,6 @@
               echo "  nix build .#test      # Run tests"
               echo ""
 
-              # Optional: Automatisch in Nushell wechseln wenn nicht bereits drin
-              if [ -z "$NU_VERSION" ] && command -v nu >/dev/null 2>&1; then
-                echo "Starting Nushell..."
-                exec nu
-              fi
             '';
 
             # Inherit von deiner direnv config
