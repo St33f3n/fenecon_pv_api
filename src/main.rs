@@ -2,9 +2,15 @@ use color_eyre::{Result, eyre::eyre};
 use tracing::{Level, debug, error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
+mod cache;
 mod calculator;
 mod collector;
 mod config;
+mod db;
+mod mqtt;
+
+#[cfg(test)]
+mod test;
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -1,11 +1,6 @@
-use crate::config::Config;
 use color_eyre::Result;
-use reqwest;
+use color_eyre::eyre::eyre;
 use serde::{Deserialize, Serialize};
-use std::any::type_name_of_val;
-use std::{any::Any, collections::HashMap};
-use tracing::{debug, info};
-use tracing_test::traced_test;
 
 const DC_POWER_PATH: &str = "_sum/ProductionDcActualPower";
 const PRODUCTION_POWER_PATH: &str = "_sum/ProductionActivePower";
@@ -17,115 +12,143 @@ const BATTERY_STATE_PATH: &str = "_sum/EssSoc";
 const BATTERY_POWER_PATH: &str = "_sum/EssActivePower";
 const BATTERY_LOADING_PATH: &str = "_sum/EssActiveChargeEnergy";
 const BATTERY_DISCHARGE_PATH: &str = "_sum/EssActiveDischargeEnergy";
-const CONSUMPTION_POWER_PATH: &str = "_sum/ConsumptionActivePower";
+pub const CONSUMPTION_POWER_PATH: &str = "_sum/ConsumptionActivePower";
 const CONSUMPTION_ENERGY_PATH: &str = "_sum/ConsumptionActiveEnergy";
 
-const PATH_ARR: [&str; 12] = [
+const PATH_POWER_ARR: [&str; 6] = [
     DC_POWER_PATH,
     PRODUCTION_POWER_PATH,
-    PRODUCTION_ENERGY_PATH,
     GRID_POWER_PATH,
-    GRID_BUY_PATH,
-    GRID_SELL_PATH,
     BATTERY_STATE_PATH,
     BATTERY_POWER_PATH,
+    CONSUMPTION_POWER_PATH,
+];
+
+const PATH_ENERGY_ARR: [&str; 6] = [
+    GRID_BUY_PATH,
+    GRID_SELL_PATH,
+    PRODUCTION_ENERGY_PATH,
+    CONSUMPTION_ENERGY_PATH,
     BATTERY_LOADING_PATH,
     BATTERY_DISCHARGE_PATH,
-    CONSUMPTION_POWER_PATH,
-    CONSUMPTION_ENERGY_PATH,
 ];
-#[derive(Deserialize)]
-struct RawPVMessage {
-    address: String,
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct RawPVMessage {
+    pub address: String,
     #[serde(rename = "type")]
-    type_field: String,
+    pub type_field: String,
     #[serde(rename = "accessMode")]
-    access_mode: String,
-    text: String,
-    unit: String,
-    value: i32,
+    pub access_mode: String,
+    pub text: String,
+    pub unit: String,
+    pub value: i64,
 }
 
-#[derive(Default, Debug)]
-struct RawPVData {
-    dc_power: u16,
-    production_power: u16,
-    production_energy: i32,
-    grid_power: i32,
-    grid_buy: i32,
-    grid_sell: i32,
-    battery_state: u8,
-    battery_loading: i32,
-    battery_discharge: i32,
-    battery_power: i32,
-    consumption_power: u16,
-    consumption_energy: i32,
+#[derive(Default, Debug, Clone)]
+pub struct RawPVData {
+    pub energy_data: RawEnergyData,
+    pub power_data: RawPowerData,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct RawPowerData {
+    pub dc_power: u16,
+    pub production_power: u16,
+    pub grid_power: i32,
+    pub battery_state: u8,
+    pub battery_power: i32,
+    pub consumption_power: u16,
+}
+#[derive(Default, Debug, Clone)]
+pub struct RawEnergyData {
+    pub grid_buy: u64,
+    pub grid_sell: u64,
+    pub battery_loading: u64,
+    pub battery_discharge: u64,
+    pub production_energy: u64,
+    pub consumption_energy: u64,
+}
+
+impl RawPowerData {
+    pub async fn get_data(base_path: &str) -> Result<Self> {
+        let mut raw_power_data = RawPowerData::default();
+        for path in PATH_POWER_ARR {
+            let url = format!("{:0}/{:1}", base_path, path);
+            if let Ok(response) = send_request(url.as_str()).await {
+                //                debug!("Value of {:0} is {:1}", response.address, response.value);
+                match response.address.as_str() {
+                    DC_POWER_PATH => raw_power_data.dc_power = response.value as u16,
+                    PRODUCTION_POWER_PATH => {
+                        raw_power_data.production_power = response.value as u16
+                    }
+                    GRID_POWER_PATH => raw_power_data.grid_power = response.value as i32,
+                    BATTERY_STATE_PATH => raw_power_data.battery_state = response.value as u8,
+                    BATTERY_POWER_PATH => raw_power_data.battery_power = response.value as i32,
+                    CONSUMPTION_POWER_PATH => {
+                        raw_power_data.consumption_power = response.value as u16
+                    }
+                    _ => panic!("Should not be possible"),
+                }
+            }
+        }
+
+        raw_power_data.battery_power -= raw_power_data.dc_power as i32;
+        Ok(raw_power_data)
+    }
+}
+
+impl RawEnergyData {
+    pub async fn get_data(base_path: &str) -> Result<Self> {
+        let mut raw_energy_data = RawEnergyData::default();
+        for path in PATH_ENERGY_ARR {
+            let url = format!("{:0}/{:1}", base_path, path);
+            if let Ok(response) = send_request(url.as_str()).await {
+                match response.address.as_str() {
+                    PRODUCTION_ENERGY_PATH => {
+                        raw_energy_data.production_energy = response.value as u64
+                    }
+                    GRID_BUY_PATH => raw_energy_data.grid_buy = response.value as u64,
+                    GRID_SELL_PATH => raw_energy_data.grid_sell = response.value as u64,
+                    BATTERY_LOADING_PATH => raw_energy_data.battery_loading = response.value as u64,
+                    BATTERY_DISCHARGE_PATH => {
+                        raw_energy_data.battery_discharge = response.value as u64
+                    }
+                    CONSUMPTION_ENERGY_PATH => {
+                        raw_energy_data.consumption_energy = response.value as u64
+                    }
+                    _ => panic!("Should not be possible"),
+                }
+            }
+        }
+
+        Ok(raw_energy_data)
+    }
 }
 
 impl RawPVData {
     pub async fn fill_raw(base_path: &str) -> Result<Self> {
-        let mut raw_pv_data = RawPVData::default();
-        for path in PATH_ARR {
-            let url = format!("{:0}/{:1}", base_path, path);
-            if let Ok(response) = send_request(url.as_str()).await {
-                match response.address.as_str() {
-                    DC_POWER_PATH => raw_pv_data.dc_power = response.value as u16,
-                    PRODUCTION_POWER_PATH => raw_pv_data.production_power = response.value as u16,
-                    PRODUCTION_ENERGY_PATH => raw_pv_data.production_energy = response.value,
-                    GRID_POWER_PATH => raw_pv_data.grid_power = response.value,
-                    GRID_BUY_PATH => raw_pv_data.grid_buy = response.value,
-                    GRID_SELL_PATH => raw_pv_data.grid_sell = response.value,
-                    BATTERY_STATE_PATH => raw_pv_data.battery_state = response.value as u8,
-                    BATTERY_POWER_PATH => raw_pv_data.battery_power = response.value,
-                    BATTERY_LOADING_PATH => raw_pv_data.battery_loading = response.value,
-                    BATTERY_DISCHARGE_PATH => raw_pv_data.battery_discharge = response.value,
-                    CONSUMPTION_POWER_PATH => raw_pv_data.consumption_power = response.value as u16,
-                    CONSUMPTION_ENERGY_PATH => raw_pv_data.consumption_energy = response.value,
-                    _ => panic!(
-                        "Received invalid Data that somehow got parsed: {}",
-                        response.address
-                    ),
-                }
-            }
+        let (energy_res, power_res) = tokio::join!(
+            RawEnergyData::get_data(base_path),
+            RawPowerData::get_data(base_path)
+        );
+
+        if energy_res.is_ok() && power_res.is_ok() {
+            let raw_pv_data = RawPVData {
+                energy_data: energy_res.unwrap(),
+                power_data: power_res.unwrap(),
+            };
+            Ok(raw_pv_data)
+        } else {
+            Err(eyre!("Request Failed"))
         }
-        Ok(raw_pv_data)
     }
 }
 
 pub async fn send_request(path: &str) -> Result<RawPVMessage> {
     let response = reqwest::get(path).await?.text().await?;
-
+    //debug!("{response}");
     let response = serde_json::from_str(&response)?;
 
     Ok(response)
-}
-
-#[traced_test]
-#[tokio::test]
-async fn single_request() {
-    let config = Config::new();
-
-    let url = format!("{:0}/{:1}", config.pv_baseaddress, CONSUMPTION_POWER_PATH);
-
-    info!("Combined URL:{}", url);
-
-    let response = send_request(&url).await.unwrap();
-    info!("Received: {}", response.value);
-    let value_type = type_name_of_val(&response.value);
-
-    assert!(value_type.contains("i32"));
-}
-
-#[traced_test]
-#[tokio::test]
-async fn fill_test() {
-    let config: Config = Config::new();
-
-    let raw_data = RawPVData::fill_raw(config.pv_baseaddress.as_str())
-        .await
-        .unwrap();
-
-    info!("The complete pv data: {:?}", raw_data);
-
-    assert_ne!(0, raw_data.consumption_power);
 }

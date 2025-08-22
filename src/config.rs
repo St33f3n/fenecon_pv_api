@@ -8,6 +8,27 @@ pub struct Config {
     pub mqtt_url: String,
     pub mqtt_user: String,
     pub mqtt_pw: String,
+    pub battery_config: BatteryConfig,
+}
+
+#[derive(Default, Debug)]
+pub struct BatteryConfig {
+    pub max_battery_energy: u16,
+    pub empty_threshold: u8,
+}
+impl BatteryConfig {
+    pub fn new() -> Self {
+        let max_battery_energy_str = env::var("MAX_BATTERY_ENERGY").unwrap_or("10000".to_string());
+        let empty_threshold_str = env::var("EMPTY_THRESHOLD").unwrap_or("10".to_string());
+
+        let max_battery_energy: u16 = max_battery_energy_str.parse().unwrap();
+        let empty_threshold: u8 = empty_threshold_str.parse().unwrap();
+
+        BatteryConfig {
+            max_battery_energy,
+            empty_threshold,
+        }
+    }
 }
 
 impl Config {
@@ -20,6 +41,8 @@ impl Config {
         let mqtt_user = env::var("MQTT_USER").unwrap_or_default();
         let mqtt_pw = env::var("MQTT_PW").unwrap_or_default();
 
+        let battery_config = BatteryConfig::new();
+
         Config {
             database_url,
             database_pw,
@@ -28,6 +51,7 @@ impl Config {
             mqtt_url,
             mqtt_user,
             mqtt_pw,
+            battery_config,
         }
     }
     pub fn to_vector(&self) -> Vec<String> {
@@ -45,11 +69,18 @@ impl Config {
 
 #[test]
 
-fn test_env() {
+fn test_pw_env() {
     let config = Config::new();
     let config_vec = config.to_vector();
     println!("{:?}", config_vec);
 
     let test = config_vec.into_iter().filter(|x| x.is_empty()).count();
     assert_eq!(0, test);
+}
+#[test]
+fn test_battery_env() {
+    let config = Config::new();
+    println!("{:?}", config.battery_config);
+    assert!(config.battery_config.max_battery_energy > 10000);
+    assert!(config.battery_config.empty_threshold >= 10)
 }
