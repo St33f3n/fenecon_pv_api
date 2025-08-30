@@ -1,12 +1,11 @@
 use std::env;
 #[derive(Default, Debug, Clone)]
 pub struct Config {
-    pub database_url: String,
-    pub database_pw: String,
-    pub database_user: String,
     pub pv_baseaddress: String,
     pub mqtt_config: MqttConfig,
     pub battery_config: BatteryConfig,
+    pub database_config: DatabaseConfig,
+    pub sqlite_cache_config: SqliteCacheConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -128,34 +127,123 @@ impl BatteryConfig {
 
 impl Config {
     pub fn new() -> Self {
-        let database_url = env::var("DATABASE_URL").unwrap_or_default();
-        let database_pw = env::var("DATABASE_PW").unwrap_or_default();
-        let database_user = env::var("DATABASE_USER").unwrap_or_default();
         let pv_baseaddress = env::var("PV_BASEADDRESS").unwrap_or_default();
-
         let mqtt_config = MqttConfig::new();
         let battery_config = BatteryConfig::new();
+        let database_config = DatabaseConfig::new();
+        let sqlite_cache_config = SqliteCacheConfig::new();
 
         Config {
-            database_url,
-            database_pw,
-            database_user,
             pv_baseaddress,
             mqtt_config,
             battery_config,
+            database_config,
+            sqlite_cache_config,
         }
     }
 
     pub fn to_vector(&self) -> Vec<String> {
         vec![
-            self.database_url.clone(),
-            self.database_pw.clone(),
-            self.database_user.clone(),
+            self.database_config.database_url.clone(),
+            self.database_config.database_pw.clone(),
+            self.database_config.database_user.clone(),
             self.pv_baseaddress.clone(),
             self.mqtt_config.broker_url.clone(),
             self.mqtt_config.username.clone(),
             self.mqtt_config.password.clone(),
         ]
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DatabaseConfig {
+    pub database_url: String,
+    pub database_pw: String,
+    pub database_user: String,
+    pub max_connections: u32,
+    pub health_check_timeout_secs: u64,
+    pub max_failures_before_degraded: u32,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            database_url: env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgresql://user:password@localhost/pv_data".to_string()),
+            database_pw: env::var("DATABASE_PW").unwrap_or_default(),
+            database_user: env::var("DATABASE_USER").unwrap_or_default(),
+            max_connections: 10,
+            health_check_timeout_secs: 10,
+            max_failures_before_degraded: 3,
+        }
+    }
+}
+
+impl DatabaseConfig {
+    pub fn new() -> Self {
+        let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
+            format!(
+                "postgresql://{}:{}@localhost/pv_data",
+                env::var("DATABASE_USER").unwrap_or_else(|_| "postgres".to_string()),
+                env::var("DATABASE_PW").unwrap_or_else(|_| "password".to_string())
+            )
+        });
+
+        Self {
+            database_url,
+            database_pw: env::var("DATABASE_PW").unwrap_or_default(),
+            database_user: env::var("DATABASE_USER").unwrap_or_default(),
+            max_connections: env::var("DB_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10),
+            health_check_timeout_secs: env::var("DB_HEALTH_CHECK_TIMEOUT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10),
+            max_failures_before_degraded: env::var("DB_MAX_FAILURES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SqliteCacheConfig {
+    pub cache_db_path: String,
+    pub archive_db_path: String,
+    pub sync_batch_size: i64,
+    pub max_cache_size_mb: u64,
+    pub cleanup_threshold_days: i64,
+}
+
+impl Default for SqliteCacheConfig {
+    fn default() -> Self {
+        Self {
+            cache_db_path: env::var("SQLITE_CACHE_PATH")
+                .unwrap_or_else(|_| "data/cache.db".to_string()),
+            archive_db_path: env::var("SQLITE_ARCHIVE_PATH")
+                .unwrap_or_else(|_| "data/archive.db".to_string()),
+            sync_batch_size: env::var("CACHE_SYNC_BATCH_SIZE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1000),
+            max_cache_size_mb: env::var("MAX_CACHE_SIZE_MB")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100),
+            cleanup_threshold_days: env::var("CACHE_CLEANUP_DAYS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(7),
+        }
+    }
+}
+
+impl SqliteCacheConfig {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
