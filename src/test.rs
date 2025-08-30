@@ -1,9 +1,12 @@
+use std::time::Duration;
+
 use super::calculator::{
     BatteryState, BatteryStatus, DataHistory, MqttPayload, ProcessedData, SupplyState,
 };
 use super::collector::CONSUMPTION_POWER_PATH;
 use super::collector::{RawEnergyData, RawPVData, RawPVMessage, send_request};
 use super::config::{BatteryConfig, Config};
+use super::mqtt::*;
 use serde_json::Value;
 use tracing::{debug, info};
 use tracing_test::traced_test;
@@ -316,4 +319,90 @@ async fn test_real_data_json_generation() {
     );
 
     debug!("✅ Real Data JSON Test erfolgreich");
+}
+
+#[traced_test]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mqtt() {
+    let config = Config::new();
+    let mqtt_url = config.mqtt_config.broker_url.clone();
+    let mqtt_user = config.mqtt_config.username.clone();
+    let mqtt_pw = config.mqtt_config.password.clone();
+    let device_id = "test_id".to_string();
+    let mqtt = SolarMqttClient::new(config.mqtt_config.clone(), device_id)
+        .await
+        .unwrap();
+    let mut status = mqtt.get_health_status().await;
+    for i in 1..5 {
+        let res = mqtt
+            .client
+            .publish(
+                "test",
+                rumqttc::QoS::AtLeastOnce,
+                false,
+                "Test-Msg".to_string(),
+            )
+            .await;
+
+        status = mqtt.get_health_status().await;
+
+        debug!("Healthstatus is : {:?}", status);
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+    assert_eq!(status, MQTTHealthStatus::Healthy);
+}
+#[traced_test]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_discovery_mqtt() {
+    let config = Config::new();
+    let mqtt_url = config.mqtt_config.broker_url.clone();
+    let mqtt_user = config.mqtt_config.username.clone();
+    let mqtt_pw = config.mqtt_config.password.clone();
+    let device_id = "test_id".to_string();
+    let mqtt = SolarMqttClient::new(config.mqtt_config.clone(), device_id)
+        .await
+        .unwrap();
+
+    std::thread::sleep(Duration::from_secs(2));
+
+    mqtt.setup_discovery().await;
+
+    std::thread::sleep(Duration::from_secs(5));
+
+    let status = mqtt.get_health_status().await;
+
+    assert_eq!(status, MQTTHealthStatus::Healthy);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_filled_mqtt() {
+    let config = Config::new();
+    let mqtt_url = config.mqtt_config.broker_url.clone();
+    let mqtt_user = config.mqtt_config.username.clone();
+    let mqtt_pw = config.mqtt_config.password.clone();
+    let device_id = "test_id".to_string();
+    let mqtt = SolarMqttClient::new(config.mqtt_config.clone(), device_id)
+        .await
+        .unwrap();
+
+    let raw = RawPVData::fill_raw(config.pv_baseaddress.as_str())
+        .await
+        .unwrap();
+
+    let calc = ProcessedData::process_raw(raw.clone(), &config.battery_config);
+    let history = DataHistory::process_raw(raw, &config.battery_config);
+
+    std::thread::sleep(Duration::from_secs(2));
+
+    mqtt.publish_availability(true).await;
+
+    mqtt.publish_current_data(&calc).await;
+    mqtt.publish_history_data(&history).await;
+    mqtt.publish_state_data(&calc).await;
+
+    std::thread::sleep(Duration::from_secs(5));
+
+    let status = mqtt.get_health_status().await;
+
+    assert_eq!(status, MQTTHealthStatus::Healthy);
 }
