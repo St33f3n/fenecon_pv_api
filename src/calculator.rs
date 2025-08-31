@@ -4,7 +4,7 @@ use serde_json::json;
 use std::cmp::Ordering;
 use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProcessedData {
     pub supply_state: SupplyState,
     pub battery_status: BatteryStatus,
@@ -21,23 +21,25 @@ pub struct DataHistory {
     pub battery_discharge: u64,
     pub battery_cycles: u16,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct BatteryStatus {
     pub battery_state: BatteryState,
     pub battery_percent: u8,
     pub battery_energy: f32,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum BatteryState {
     Loading(u32),
     Discharging(u32),
     Full,
+    #[default]
     Empty,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub enum SupplyState {
     Surplus(u32),
     Demand(u32),
+    #[default]
     Offline,
 }
 

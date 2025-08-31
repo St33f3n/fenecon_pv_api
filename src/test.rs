@@ -1,11 +1,14 @@
 use std::time::Duration;
 
+use crate::config;
+
 use super::calculator::{
     BatteryState, BatteryStatus, DataHistory, MqttPayload, ProcessedData, SupplyState,
 };
 use super::collector::CONSUMPTION_POWER_PATH;
 use super::collector::{RawEnergyData, RawPVData, RawPVMessage, send_request};
 use super::config::{BatteryConfig, Config};
+use super::db::{PostgresDatabase, PvEnergyRecord, PvPowerRecord, SqliteCache};
 use super::mqtt::*;
 use serde_json::Value;
 use tracing::{debug, info};
@@ -405,4 +408,30 @@ async fn test_filled_mqtt() {
     let status = mqtt.get_health_status().await;
 
     assert_eq!(status, MQTTHealthStatus::Healthy);
+}
+#[traced_test]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_db_filled_() {
+    let config = Config::new();
+    let raw = RawPVData::fill_raw(config.pv_baseaddress.as_str())
+        .await
+        .unwrap();
+
+    let calc = ProcessedData::process_raw(raw.clone(), &config.battery_config);
+    let history = DataHistory::process_raw(raw, &config.battery_config);
+
+    let pgdb = PostgresDatabase::new(config.database_config.clone())
+        .await
+        .unwrap();
+
+    let sqldb = SqliteCache::new(config::SqliteCacheConfig::new())
+        .await
+        .unwrap();
+
+    sqldb.store_power_data(&calc).await.unwrap();
+    sqldb.store_energy_data(&history).await.unwrap();
+
+    sqldb.sync_to_postgres(&pgdb).await.unwrap();
+
+    sqldb.archive_complete_cache().await.unwrap();
 }

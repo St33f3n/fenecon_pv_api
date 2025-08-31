@@ -4,8 +4,11 @@ use chrono::{DateTime, Utc};
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{PgPool, SqlitePool};
+use sqlx::sqlite::{SqlitePoolOptions, SqliteRow};
+use sqlx::{
+    Decode, Encode, PgPool, Row, Sqlite, SqlitePool, Transaction, Type, postgres::PgTypeInfo,
+    sqlite::SqliteTypeInfo,
+};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -19,7 +22,8 @@ use tracing::{debug, error, field, info, instrument, warn};
 pub struct PvPowerRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
-    pub timestamp: DateTime<Utc>,
+    #[sqlx(try_from = "String", rename = "created_at")]
+    pub timestamp: UtcDateTime,
     pub pv_production: i32,
     pub supply_power: i32,
     pub battery_power: i32,
@@ -28,14 +32,16 @@ pub struct PvPowerRecord {
     pub supply_state: String,
     pub battery_percent: i32,
     pub battery_energy_wh: i32,
-    pub created_at: DateTime<Utc>,
+    #[sqlx(try_from = "String", rename = "created_at")]
+    pub created_at: UtcDateTime,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PvEnergyRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
-    pub timestamp: DateTime<Utc>,
+    #[sqlx(try_from = "String", rename = "created_at")]
+    pub timestamp: UtcDateTime,
     pub grid_buy_wh: u64,
     pub grid_sell_wh: u64,
     pub production_energy_wh: u64,
@@ -43,13 +49,79 @@ pub struct PvEnergyRecord {
     pub battery_loaded_wh: u64,
     pub battery_discharge_wh: u64,
     pub battery_cycles: u32,
-    pub created_at: DateTime<Utc>,
+    #[sqlx(try_from = "String", rename = "created_at")]
+    pub created_at: UtcDateTime,
+}
+#[derive(Debug, Copy, Clone, Deserialize, Serialize)]
+pub struct UtcDateTime(pub DateTime<Utc>);
+
+impl UtcDateTime {
+    fn as_chrono(&self) -> DateTime<Utc> {
+        self.0
+    }
+}
+
+impl TryFrom<String> for UtcDateTime {
+    type Error = chrono::ParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        DateTime::parse_from_rfc3339(&value).map(|dt| UtcDateTime(dt.with_timezone(&Utc)))
+    }
+}
+
+impl Type<sqlx::Sqlite> for UtcDateTime {
+    fn type_info() -> SqliteTypeInfo {
+        <String as Type<sqlx::Sqlite>>::type_info()
+    }
+}
+
+impl Type<sqlx::Postgres> for UtcDateTime {
+    fn type_info() -> PgTypeInfo {
+        <DateTime<Utc> as Type<sqlx::Postgres>>::type_info()
+    }
+}
+
+impl<'q> Encode<'q, sqlx::Sqlite> for UtcDateTime {
+    fn encode_by_ref(
+        &self,
+        args: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'q>>,
+    ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
+        <String as Encode<sqlx::Sqlite>>::encode_by_ref(&self.0.to_rfc3339(), args)
+    }
+}
+
+impl<'q> Encode<'q, sqlx::Postgres> for UtcDateTime {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
+        <DateTime<Utc> as Encode<sqlx::Postgres>>::encode_by_ref(&self.0, buf)
+    }
+}
+impl<'r> Decode<'r, sqlx::Sqlite> for UtcDateTime {
+    fn decode(
+        value: sqlx::sqlite::SqliteValueRef<'r>,
+    ) -> Result<Self, Box<dyn std::error::Error + 'static + Send + Sync>> {
+        let s = <String as Decode<sqlx::Sqlite>>::decode(value)?;
+        DateTime::parse_from_rfc3339(&s)
+            .map(|dt| UtcDateTime(dt.with_timezone(&Utc)))
+            .map_err(Into::into)
+    }
+}
+
+impl<'r> Decode<'r, sqlx::Postgres> for UtcDateTime {
+    fn decode(
+        value: sqlx::postgres::PgValueRef<'r>,
+    ) -> Result<Self, Box<dyn std::error::Error + 'static + Send + Sync>> {
+        let dt = <DateTime<Utc> as Decode<sqlx::Postgres>>::decode(value)?;
+        Ok(UtcDateTime(dt))
+    }
 }
 
 // Conversion implementations for proper serialization
 impl From<&ProcessedData> for PvPowerRecord {
     fn from(data: &ProcessedData) -> Self {
-        let timestamp = Utc::now();
+        let timestamp = UtcDateTime(Utc::now());
         Self {
             id: None,
             timestamp,
@@ -60,7 +132,7 @@ impl From<&ProcessedData> for PvPowerRecord {
             battery_state: data.battery_status.battery_state.state_string(),
             supply_state: data.supply_state.state_string(),
             battery_percent: data.battery_status.battery_percent as i32,
-            battery_energy_wh: (data.battery_status.battery_energy * 1000.0) as i32,
+            battery_energy_wh: data.battery_status.battery_energy as i32,
             created_at: timestamp,
         }
     }
@@ -68,7 +140,7 @@ impl From<&ProcessedData> for PvPowerRecord {
 
 impl From<&DataHistory> for PvEnergyRecord {
     fn from(data: &DataHistory) -> Self {
-        let timestamp = Utc::now();
+        let timestamp = UtcDateTime(Utc::now());
         Self {
             id: None,
             timestamp,
@@ -170,44 +242,57 @@ impl PostgresDatabase {
 
     async fn init_schema(pool: &PgPool) -> Result<()> {
         sqlx::query(r#"
-            CREATE TABLE IF NOT EXISTS pv_power_data (
-                id BIGSERIAL PRIMARY KEY,
-                timestamp TIMESTAMP WITH TIME ZONE NOT NULL UNIQUE,
-                pv_production INTEGER NOT NULL,
-                supply_power INTEGER NOT NULL,
-                battery_power INTEGER NOT NULL,
-                consumption INTEGER NOT NULL,
-                battery_state VARCHAR(20) NOT NULL,
-                supply_state VARCHAR(20) NOT NULL,
-                battery_percent INTEGER NOT NULL CHECK (battery_percent >= 0 AND battery_percent <= 100),
-                battery_energy_wh INTEGER NOT NULL CHECK (battery_energy_wh >= 0),
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_pv_power_timestamp ON pv_power_data(timestamp DESC);
-            
-            CREATE TABLE IF NOT EXISTS pv_energy_data (
-                id BIGSERIAL PRIMARY KEY,
-                timestamp TIMESTAMP WITH TIME ZONE NOT NULL UNIQUE,
-                grid_buy_wh BIGINT NOT NULL CHECK (grid_buy_wh >= 0),
-                grid_sell_wh BIGINT NOT NULL CHECK (grid_sell_wh >= 0),
-                production_energy_wh BIGINT NOT NULL CHECK (production_energy_wh >= 0),
-                consumption_energy_wh BIGINT NOT NULL CHECK (consumption_energy_wh >= 0),
-                battery_loaded_wh BIGINT NOT NULL CHECK (battery_loaded_wh >= 0),
-                battery_discharge_wh BIGINT NOT NULL CHECK (battery_discharge_wh >= 0),
-                battery_cycles INTEGER NOT NULL CHECK (battery_cycles >= 0),
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_pv_energy_timestamp ON pv_energy_data(timestamp DESC);
-        "#)
+        CREATE TABLE IF NOT EXISTS pv_power_data (
+            id BIGSERIAL PRIMARY KEY,
+            timestamp TIMESTAMP WITH TIME ZONE NOT NULL UNIQUE,
+            pv_production INTEGER NOT NULL,
+            supply_power INTEGER NOT NULL,
+            battery_power INTEGER NOT NULL,
+            consumption INTEGER NOT NULL,
+            battery_state VARCHAR(20) NOT NULL,
+            supply_state VARCHAR(20) NOT NULL,
+            battery_percent INTEGER NOT NULL CHECK (battery_percent >= 0 AND battery_percent <= 100),
+            battery_energy_wh INTEGER NOT NULL CHECK (battery_energy_wh >= 0),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    "#)
+    .execute(pool)
+    .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_pv_power_timestamp ON pv_power_data(timestamp DESC)",
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+        CREATE TABLE IF NOT EXISTS pv_energy_data (
+            id BIGSERIAL PRIMARY KEY,
+            timestamp TIMESTAMP WITH TIME ZONE NOT NULL UNIQUE,
+            grid_buy_wh BIGINT NOT NULL CHECK (grid_buy_wh >= 0),
+            grid_sell_wh BIGINT NOT NULL CHECK (grid_sell_wh >= 0),
+            production_energy_wh BIGINT NOT NULL CHECK (production_energy_wh >= 0),
+            consumption_energy_wh BIGINT NOT NULL CHECK (consumption_energy_wh >= 0),
+            battery_loaded_wh BIGINT NOT NULL CHECK (battery_loaded_wh >= 0),
+            battery_discharge_wh BIGINT NOT NULL CHECK (battery_discharge_wh >= 0),
+            battery_cycles INTEGER NOT NULL CHECK (battery_cycles >= 0),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_pv_energy_timestamp ON pv_energy_data(timestamp DESC)",
+        )
         .execute(pool)
         .await?;
 
         info!("PostgreSQL schema initialized");
         Ok(())
     }
-
     pub async fn store_power_data(&self, data: &ProcessedData) -> Result<()> {
         let pool = self
             .pool
@@ -233,7 +318,7 @@ impl PostgresDatabase {
                 battery_percent = EXCLUDED.battery_percent,
                 battery_energy_wh = EXCLUDED.battery_energy_wh
             "#,
-            record.timestamp,
+            record.timestamp.as_chrono(),
             record.pv_production,
             record.supply_power,
             record.battery_power,
@@ -286,7 +371,7 @@ impl PostgresDatabase {
                 battery_discharge_wh = EXCLUDED.battery_discharge_wh,
                 battery_cycles = EXCLUDED.battery_cycles
             "#,
-            record.timestamp,
+            record.timestamp.as_chrono(),
             record.grid_buy_wh as i64,
             record.grid_sell_wh as i64,
             record.production_energy_wh as i64,
@@ -374,13 +459,23 @@ impl PostgresDatabase {
     }
 }
 
-// =============================================================================
-// SQLITE CACHE MODULE - Local Cache & Archive
-// =============================================================================
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncResult {
+    pub records_synced: u64,
+    pub duration_ms: u64,
+    pub success: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CacheStats {
+    pub power_records_cached: u64,
+    pub energy_records_cached: u64,
+    pub power_records_archived: u64,
+    pub energy_records_archived: u64,
+}
 
 pub struct SqliteCache {
     cache_pool: SqlitePool,
-    archive_pool: SqlitePool,
     config: SqliteCacheConfig,
 }
 
@@ -388,33 +483,21 @@ impl SqliteCache {
     pub async fn new(config: SqliteCacheConfig) -> Result<Self> {
         info!("Initializing SQLite cache system");
 
-        // Ensure directories exist
-        for path in [&config.cache_db_path, &config.archive_db_path] {
-            if let Some(parent) = std::path::Path::new(path).parent() {
-                std::fs::create_dir_all(parent)
-                    .wrap_err_with(|| format!("Failed to create directory for {}", path))?;
-            }
-        }
-
         let cache_pool = Self::create_pool(&config.cache_db_path).await?;
-        let archive_pool = Self::create_pool(&config.archive_db_path).await?;
 
         Self::init_cache_schema(&cache_pool).await?;
-        Self::init_archive_schema(&archive_pool).await?;
+        Self::init_archive_schema(&cache_pool).await?;
 
-        info!("SQLite cache system initialized");
-        Ok(Self {
-            cache_pool,
-            archive_pool,
-            config,
-        })
+        info!("SQLite cache system initialized successfully");
+        Ok(Self { cache_pool, config })
     }
 
     async fn create_pool(path: &str) -> Result<SqlitePool> {
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect(&format!("sqlite://{}", path))
-            .await?;
+            .await
+            .wrap_err_with(|| format!("Failed to create SQLite pool for {}", path))?;
 
         debug!(path = %path, "SQLite pool created");
         Ok(pool)
@@ -454,7 +537,8 @@ impl SqliteCache {
             CREATE INDEX IF NOT EXISTS idx_cache_energy_timestamp ON pv_energy_cache(timestamp DESC);
         "#)
         .execute(pool)
-        .await?;
+        .await
+        .wrap_err("Failed to initialize cache schema")?;
 
         debug!("Cache schema initialized");
         Ok(())
@@ -498,66 +582,71 @@ impl SqliteCache {
             CREATE INDEX IF NOT EXISTS idx_archive_energy_archived_at ON pv_energy_archive(archived_at DESC);
         "#)
         .execute(pool)
-        .await?;
+        .await
+        .wrap_err("Failed to initialize archive schema")?;
 
         debug!("Archive schema initialized");
         Ok(())
     }
 
+    #[instrument(skip(self, data), fields(timestamp = %data.battery_status.battery_percent))]
     pub async fn store_power_data(&self, data: &ProcessedData) -> Result<()> {
         let record = PvPowerRecord::from(data);
 
-        sqlx::query!(
-            r#"
+        let query = r#"
             INSERT OR REPLACE INTO pv_power_cache (
                 timestamp, pv_production, supply_power, battery_power, consumption,
                 battery_state, supply_state, battery_percent, battery_energy_wh
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-            record.timestamp.to_rfc3339(),
-            record.pv_production,
-            record.supply_power,
-            record.battery_power,
-            record.consumption,
-            record.battery_state,
-            record.supply_state,
-            record.battery_percent,
-            record.battery_energy_wh
-        )
-        .execute(&self.cache_pool)
-        .await?;
+        "#;
+
+        sqlx::query(query)
+            .bind(record.timestamp.as_chrono().to_rfc3339())
+            .bind(record.pv_production)
+            .bind(record.supply_power)
+            .bind(record.battery_power)
+            .bind(record.consumption)
+            .bind(record.battery_state)
+            .bind(record.supply_state)
+            .bind(record.battery_percent)
+            .bind(record.battery_energy_wh)
+            .execute(&self.cache_pool)
+            .await
+            .wrap_err("Failed to store power data in cache")?;
 
         debug!("Power data stored in cache");
         Ok(())
     }
 
+    #[instrument(skip(self, data), fields(grid_buy = data.grid_buy, grid_sell = data.grid_sell))]
     pub async fn store_energy_data(&self, data: &DataHistory) -> Result<()> {
         let record = PvEnergyRecord::from(data);
 
-        sqlx::query!(
-            r#"
+        let query = r#"
             INSERT OR REPLACE INTO pv_energy_cache (
                 timestamp, grid_buy_wh, grid_sell_wh, production_energy_wh,
                 consumption_energy_wh, battery_loaded_wh, battery_discharge_wh, battery_cycles
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-            record.timestamp.to_rfc3339(),
-            record.grid_buy_wh as i64,
-            record.grid_sell_wh as i64,
-            record.production_energy_wh as i64,
-            record.consumption_energy_wh as i64,
-            record.battery_loaded_wh as i64,
-            record.battery_discharge_wh as i64,
-            record.battery_cycles as i32
-        )
-        .execute(&self.cache_pool)
-        .await?;
+        "#;
+
+        sqlx::query(query)
+            .bind(record.timestamp.as_chrono().to_rfc3339())
+            .bind(record.grid_buy_wh as i64)
+            .bind(record.grid_sell_wh as i64)
+            .bind(record.production_energy_wh as i64)
+            .bind(record.consumption_energy_wh as i64)
+            .bind(record.battery_loaded_wh as i64)
+            .bind(record.battery_discharge_wh as i64)
+            .bind(record.battery_cycles as i32)
+            .execute(&self.cache_pool)
+            .await
+            .wrap_err("Failed to store energy data in cache")?;
 
         debug!("Energy data stored in cache");
         Ok(())
     }
 
-    // Sync function to be triggered by state machine
+    #[instrument(skip(self, postgres_db), fields(sync_batch_size = self.config.sync_batch_size))]
     pub async fn sync_to_postgres(&self, postgres_db: &PostgresDatabase) -> Result<SyncResult> {
         info!("Starting cache synchronization to PostgreSQL");
         let start_time = Instant::now();
@@ -588,93 +677,53 @@ impl SqliteCache {
     }
 
     async fn sync_power_data_batch(&self, postgres_db: &PostgresDatabase) -> Result<u64> {
-        let cached_records = sqlx::query_as!(
-            PvPowerRecord,
+        let cached_records: Vec<PvPowerRecord> = sqlx::query_as(
             r#"
             SELECT 
                 id, timestamp, pv_production, supply_power, battery_power, consumption,
-                battery_state, supply_state, battery_percent, battery_energy_wh, created_at
+                battery_state, supply_state, battery_percent, battery_energy_wh, 
+                timestamp as created_at
             FROM pv_power_cache 
             ORDER BY timestamp ASC 
             LIMIT ?
             "#,
-            self.config.sync_batch_size
         )
+        .bind(self.config.sync_batch_size)
         .fetch_all(&self.cache_pool)
         .await?;
-
-        if cached_records.is_empty() {
-            return Ok(0);
+        for record in &cached_records {
+            // record ist bereits PvPowerRecord
+            self.store_serialized_power_data(postgres_db, record)
+                .await?;
         }
 
-        let mut synced_count = 0u64;
-        let mut timestamps_to_archive = Vec::new();
-
-        for record in cached_records {
-            // Use serialized record directly with PostgreSQL
-            if self
-                .store_serialized_power_data(postgres_db, &record)
-                .await
-                .is_ok()
-            {
-                synced_count += 1;
-                timestamps_to_archive.push(record.timestamp.to_rfc3339());
-            }
-        }
-
-        // Archive successfully synced records
-        if !timestamps_to_archive.is_empty() {
-            self.archive_power_records(&timestamps_to_archive).await?;
-        }
-
-        Ok(synced_count)
+        Ok(cached_records.len() as u64)
     }
 
     async fn sync_energy_data_batch(&self, postgres_db: &PostgresDatabase) -> Result<u64> {
-        let cached_records = sqlx::query_as!(
-            PvEnergyRecord,
+        let cached_records: Vec<PvEnergyRecord> = sqlx::query_as(
             r#"
-            SELECT 
-                id, timestamp, grid_buy_wh, grid_sell_wh, production_energy_wh, 
-                consumption_energy_wh, battery_loaded_wh, battery_discharge_wh, 
-                battery_cycles, created_at
-            FROM pv_energy_cache 
-            ORDER BY timestamp ASC 
-            LIMIT ?
-            "#,
-            self.config.sync_batch_size
+       SELECT 
+           id, timestamp, grid_buy_wh, grid_sell_wh, production_energy_wh, 
+           consumption_energy_wh, battery_loaded_wh, battery_discharge_wh, 
+           battery_cycles, timestamp as created_at
+       FROM pv_energy_cache 
+       ORDER BY timestamp ASC 
+       LIMIT ?
+       "#,
         )
+        .bind(self.config.sync_batch_size)
         .fetch_all(&self.cache_pool)
         .await?;
-
-        if cached_records.is_empty() {
-            return Ok(0);
+        for record in &cached_records {
+            self.store_serialized_energy_data(postgres_db, record)
+                .await?;
         }
 
-        let mut synced_count = 0u64;
-        let mut timestamps_to_archive = Vec::new();
-
-        for record in cached_records {
-            // Use serialized record directly with PostgreSQL
-            if self
-                .store_serialized_energy_data(postgres_db, &record)
-                .await
-                .is_ok()
-            {
-                synced_count += 1;
-                timestamps_to_archive.push(record.timestamp.to_rfc3339());
-            }
-        }
-
-        // Archive successfully synced records
-        if !timestamps_to_archive.is_empty() {
-            self.archive_energy_records(&timestamps_to_archive).await?;
-        }
-
-        Ok(synced_count)
+        Ok(cached_records.len() as u64)
     }
 
-    // Direct serialized storage for sync operations
+    // Direct serialized storage for sync operations (unchanged)
     async fn store_serialized_power_data(
         &self,
         postgres_db: &PostgresDatabase,
@@ -693,7 +742,7 @@ impl SqliteCache {
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (timestamp) DO NOTHING
             "#,
-            record.timestamp,
+            record.timestamp.as_chrono(),
             record.pv_production,
             record.supply_power,
             record.battery_power,
@@ -727,7 +776,7 @@ impl SqliteCache {
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (timestamp) DO NOTHING
             "#,
-            record.timestamp,
+            record.timestamp.as_chrono(),
             record.grid_buy_wh as i64,
             record.grid_sell_wh as i64,
             record.production_energy_wh as i64,
@@ -742,89 +791,141 @@ impl SqliteCache {
         Ok(())
     }
 
-    // Archive function to be triggered by state machine
-    async fn archive_power_records(&self, timestamps: &[String]) -> Result<()> {
-        let mut archive_tx = self.archive_pool.begin().await?;
+    // Archiviert alle Power Records aus dem Cache und leert den Cache
+    pub async fn archive_all_power_records(&self) -> Result<u64> {
+        debug!("Starting power records archive operation");
+
         let mut cache_tx = self.cache_pool.begin().await?;
 
-        for timestamp in timestamps {
-            // Move record from cache to archive
-            sqlx::query!(
-                r#"
-                INSERT INTO pv_power_archive 
-                SELECT *, datetime('now', 'utc') as archived_at 
-                FROM pv_power_cache 
-                WHERE timestamp = ?
-                "#,
-                timestamp
-            )
-            .execute(&mut *archive_tx)
+        // Get count before archiving
+        let record_count: i64 = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pv_power_cache")
+            .fetch_one(&self.cache_pool)
             .await?;
 
-            // Delete from cache
-            sqlx::query!("DELETE FROM pv_power_cache WHERE timestamp = ?", timestamp)
-                .execute(&mut *cache_tx)
-                .await?;
+        if record_count == 0 {
+            debug!("No power records to archive");
+            return Ok(0);
         }
 
-        archive_tx.commit().await?;
+        // Archive all records from cache
+        let archived_rows = sqlx::query(
+            r#"
+        INSERT INTO pv_power_archive 
+        SELECT *, datetime('now', 'utc') as archived_at 
+        FROM pv_power_cache
+        "#,
+        )
+        .execute(&mut *cache_tx)
+        .await?
+        .rows_affected();
+
+        // Clear the cache completely
+        sqlx::query("DELETE FROM pv_power_cache")
+            .execute(&mut *cache_tx)
+            .await?;
+
         cache_tx.commit().await?;
 
-        debug!(archived_count = timestamps.len(), "Power records archived");
-        Ok(())
+        debug!(
+            archived_count = archived_rows,
+            "Power cache archived and cleared"
+        );
+        Ok(archived_rows)
     }
 
-    async fn archive_energy_records(&self, timestamps: &[String]) -> Result<()> {
-        let mut archive_tx = self.archive_pool.begin().await?;
+    // Archiviert alle Energy Records aus dem Cache und leert den Cache
+    pub async fn archive_all_energy_records(&self) -> Result<u64> {
+        debug!("Starting energy records archive operation");
+
         let mut cache_tx = self.cache_pool.begin().await?;
 
-        for timestamp in timestamps {
-            // Move record from cache to archive
-            sqlx::query!(
-                r#"
-                INSERT INTO pv_energy_archive 
-                SELECT *, datetime('now', 'utc') as archived_at 
-                FROM pv_energy_cache 
-                WHERE timestamp = ?
-                "#,
-                timestamp
-            )
-            .execute(&mut *archive_tx)
-            .await?;
-
-            // Delete from cache
-            sqlx::query!("DELETE FROM pv_energy_cache WHERE timestamp = ?", timestamp)
-                .execute(&mut *cache_tx)
+        // Get count before archiving
+        let record_count: i64 =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pv_energy_cache")
+                .fetch_one(&self.cache_pool)
                 .await?;
+
+        if record_count == 0 {
+            debug!("No energy records to archive");
+            return Ok(0);
         }
 
-        archive_tx.commit().await?;
+        // Archive all records from cache
+        let archived_rows = sqlx::query(
+            r#"
+        INSERT INTO pv_energy_archive 
+        SELECT *, datetime('now', 'utc') as archived_at 
+        FROM pv_energy_cache
+        "#,
+        )
+        .execute(&mut *cache_tx)
+        .await?
+        .rows_affected();
+
+        // Clear the cache completely
+        sqlx::query("DELETE FROM pv_energy_cache")
+            .execute(&mut *cache_tx)
+            .await?;
+
         cache_tx.commit().await?;
 
-        debug!(archived_count = timestamps.len(), "Energy records archived");
-        Ok(())
+        debug!(
+            archived_count = archived_rows,
+            "Energy cache archived and cleared"
+        );
+        Ok(archived_rows)
     }
 
+    // Combined function um beide Caches auf einmal zu archivieren
+    pub async fn archive_complete_cache(&self) -> Result<(u64, u64)> {
+        debug!("Starting complete cache archive operation");
+
+        let power_archived = self.archive_all_power_records().await?;
+        let energy_archived = self.archive_all_energy_records().await?;
+
+        debug!(
+            power_archived = power_archived,
+            energy_archived = energy_archived,
+            total_archived = power_archived + energy_archived,
+            "Complete cache archive finished"
+        );
+
+        Ok((power_archived, energy_archived))
+    }
+
+    #[instrument(skip(self))]
     pub async fn get_cache_stats(&self) -> Result<CacheStats> {
-        let power_cached = sqlx::query_scalar!("SELECT COUNT(*) FROM pv_power_cache")
+        // Count power cache records
+        let power_cached = sqlx::query("SELECT COUNT(*) as count FROM pv_power_cache")
             .fetch_one(&self.cache_pool)
-            .await?
-            .unwrap_or(0) as u64;
+            .await
+            .wrap_err("Failed to count power cache records")?
+            .try_get::<i64, _>("count")
+            .wrap_err("Failed to get power cache count")? as u64;
 
-        let energy_cached = sqlx::query_scalar!("SELECT COUNT(*) FROM pv_energy_cache")
+        // Count energy cache records
+        let energy_cached = sqlx::query("SELECT COUNT(*) as count FROM pv_energy_cache")
             .fetch_one(&self.cache_pool)
-            .await?
-            .unwrap_or(0) as u64;
+            .await
+            .wrap_err("Failed to count energy cache records")?
+            .try_get::<i64, _>("count")
+            .wrap_err("Failed to get energy cache count")? as u64;
 
-        let power_archived = sqlx::query_scalar!("SELECT COUNT(*) FROM pv_power_archive")
-            .fetch_one(&self.archive_pool)
-            .await?
-            .unwrap_or(0) as u64;
+        // Count power archive records
+        let power_archived = sqlx::query("SELECT COUNT(*) as count FROM pv_power_archive")
+            .fetch_one(&self.cache_pool)
+            .await
+            .wrap_err("Failed to count power archive records")?
+            .try_get::<i64, _>("count")
+            .wrap_err("Failed to get power archive count")? as u64;
 
-        let energy_archived = sqlx::query_scalar!("SELECT COUNT(*) FROM pv_energy_archive")
-            .fetch_one(&self.archive_pool)
-            .await?
-            .unwrap_or(0) as u64;
+        // Count energy archive records
+        let energy_archived = sqlx::query("SELECT COUNT(*) as count FROM pv_energy_archive")
+            .fetch_one(&self.cache_pool)
+            .await
+            .wrap_err("Failed to count energy archive records")?
+            .try_get::<i64, _>("count")
+            .wrap_err("Failed to get energy archive count")? as u64;
 
         Ok(CacheStats {
             power_records_cached: power_cached,
@@ -833,236 +934,56 @@ impl SqliteCache {
             energy_records_archived: energy_archived,
         })
     }
+}
+#[tokio::test]
+async fn test_record_conversion() {
+    let mut processed_data = ProcessedData::default();
+    processed_data.full_production = 2500;
+    processed_data.consumption = 1100;
+    processed_data.battery_status.battery_percent = 75;
+    processed_data.battery_status.battery_energy = 6500.0;
 
-    // Manual cleanup function - triggered by state machine when needed
-    pub async fn cleanup_old_cache(&self, days_old: i64) -> Result<u64> {
-        let cutoff_date = (Utc::now() - chrono::Duration::days(days_old)).to_rfc3339();
+    let power_record = PvPowerRecord::from(&processed_data);
 
-        let power_deleted = sqlx::query!(
-            "DELETE FROM pv_power_cache WHERE timestamp < ?",
-            cutoff_date
-        )
-        .execute(&self.cache_pool)
-        .await?
-        .rows_affected();
-
-        let energy_deleted = sqlx::query!(
-            "DELETE FROM pv_energy_cache WHERE timestamp < ?",
-            cutoff_date
-        )
-        .execute(&self.cache_pool)
-        .await?
-        .rows_affected();
-
-        let total_deleted = power_deleted + energy_deleted;
-        info!(
-            power_deleted = power_deleted,
-            energy_deleted = energy_deleted,
-            total_deleted = total_deleted,
-            cutoff_days = days_old,
-            "Cleaned up old cache data"
-        );
-
-        Ok(total_deleted)
-    }
+    assert_eq!(power_record.pv_production, 2500);
+    assert_eq!(power_record.consumption, 1100);
+    assert_eq!(power_record.battery_percent, 75);
+    assert_eq!(power_record.battery_energy_wh, 6500); // 6.5kWh = 6500Wh
 }
 
-// =============================================================================
-// SUPPORTING TYPES AND STRUCTS
-// =============================================================================
+#[tokio::test]
+async fn test_sqlite_cache_creation() {
+    let config = SqliteCacheConfig {
+        max_cache_size_mb: 100,
+        cache_db_path: "data/test_power_cache.db".to_string(),
+        sync_batch_size: 100,
+        cleanup_threshold_days: 150,
+    };
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SyncResult {
-    pub records_synced: u64,
-    pub duration_ms: u64,
-    pub success: bool,
+    let cache = SqliteCache::new(config).await;
+    assert!(cache.is_ok());
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CacheStats {
-    pub power_records_cached: u64,
-    pub energy_records_cached: u64,
-    pub power_records_archived: u64,
-    pub energy_records_archived: u64,
-}
+#[tokio::test]
+async fn test_cache_power_data_storage() {
+    let config = SqliteCacheConfig {
+        max_cache_size_mb: 100,
+        cache_db_path: "data/test_power_cache.db".to_string(),
+        sync_batch_size: 100,
+        cleanup_threshold_days: 150,
+    };
 
-// =============================================================================
-// DATABASE MANAGER - Coordinates both systems based on state machine input
-// =============================================================================
+    let cache = SqliteCache::new(config).await.unwrap();
 
-pub struct DatabaseManager {
-    pub postgres: PostgresDatabase,
-    pub cache: SqliteCache,
-}
+    let mut processed_data = ProcessedData::default();
+    processed_data.full_production = 2500;
+    processed_data.consumption = 1100;
+    processed_data.battery_status.battery_percent = 75;
+    processed_data.battery_status.battery_energy = 6500.0;
 
-impl DatabaseManager {
-    pub async fn new(db_config: DatabaseConfig, cache_config: SqliteCacheConfig) -> Result<Self> {
-        info!("Initializing database manager");
+    let result = cache.store_power_data(&processed_data).await;
+    assert!(result.is_ok());
 
-        let postgres = PostgresDatabase::new(db_config).await?;
-        let cache = SqliteCache::new(cache_config).await?;
-
-        info!("Database manager initialized successfully");
-        Ok(Self { postgres, cache })
-    }
-
-    // Store data based on state machine decision
-    pub async fn store_power_data(&self, data: &ProcessedData, use_postgres: bool) -> Result<()> {
-        if use_postgres {
-            self.postgres.store_power_data(data).await
-        } else {
-            self.cache.store_power_data(data).await
-        }
-    }
-
-    pub async fn store_energy_data(&self, data: &DataHistory, use_postgres: bool) -> Result<()> {
-        if use_postgres {
-            self.postgres.store_energy_data(data).await
-        } else {
-            self.cache.store_energy_data(data).await
-        }
-    }
-
-    // State machine triggered operations
-    pub async fn sync_cache_to_postgres(&self) -> Result<SyncResult> {
-        self.cache.sync_to_postgres(&self.postgres).await
-    }
-
-    pub async fn get_postgres_health(&self) -> PostgresHealth {
-        self.postgres.get_health().await
-    }
-
-    pub async fn check_postgres_health(&self) -> Result<PostgresHealth> {
-        self.postgres.health_check().await
-    }
-
-    pub async fn get_postgres_state(&self) -> PostgresState {
-        self.postgres.get_state().await
-    }
-
-    pub async fn get_cache_stats(&self) -> Result<CacheStats> {
-        self.cache.get_cache_stats().await
-    }
-
-    pub async fn cleanup_old_cache(&self, days_old: i64) -> Result<u64> {
-        self.cache.cleanup_old_cache(days_old).await
-    }
-}
-
-// =============================================================================
-// TESTS MODULE
-// =============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::calculator::{BatteryState, BatteryStatus, SupplyState};
-
-    fn create_test_processed_data() -> ProcessedData {
-        ProcessedData {
-            supply_state: SupplyState::Surplus(800),
-            battery_status: BatteryStatus {
-                battery_state: BatteryState::Loading(600),
-                battery_percent: 75,
-                battery_energy: 6.5,
-            },
-            full_production: 2500,
-            consumption: 1100,
-        }
-    }
-
-    fn create_test_energy_data() -> crate::calculator::DataHistory {
-        crate::calculator::DataHistory {
-            grid_buy: 12500,           // Wh
-            grid_sell: 18750,          // Wh
-            production_energy: 25600,  // Wh
-            consumption_energy: 19200, // Wh
-            battery_loaded: 3200,      // Wh
-            battery_discharge: 2950,   // Wh
-            battery_cycles: 142,
-        }
-    }
-
-    #[tokio::test]
-    async fn test_record_conversion() {
-        let processed_data = create_test_processed_data();
-        let power_record = PvPowerRecord::from(&processed_data);
-
-        assert_eq!(power_record.pv_production, 2500);
-        assert_eq!(power_record.consumption, 1100);
-        assert_eq!(power_record.battery_percent, 75);
-        assert_eq!(power_record.battery_energy_wh, 6500); // 6.5kWh = 6500Wh
-
-        let energy_data = create_test_energy_data();
-        let energy_record = PvEnergyRecord::from(&energy_data);
-
-        assert_eq!(energy_record.grid_buy_wh, 12500);
-        assert_eq!(energy_record.battery_cycles, 142);
-    }
-
-    #[tokio::test]
-    async fn test_sqlite_cache_creation() {
-        let config = SqliteCacheConfig {
-            max_cache_size_mb: 100,
-            cache_db_path: "test_power_cache.db".to_string(),
-            archive_db_path: "test_power_archive.db".to_string(),
-            sync_batch_size: 100,
-            cleanup_threshold_days: 150,
-        };
-
-        let cache = SqliteCache::new(config).await;
-        assert!(cache.is_ok());
-
-        // Cleanup
-        std::fs::remove_file("test_cache.db").ok();
-        std::fs::remove_file("test_archive.db").ok();
-    }
-
-    #[tokio::test]
-    async fn test_cache_power_data_storage() {
-        let config = SqliteCacheConfig {
-            max_cache_size_mb: 100,
-            cache_db_path: "test_power_cache.db".to_string(),
-            archive_db_path: "test_power_archive.db".to_string(),
-            sync_batch_size: 100,
-            cleanup_threshold_days: 150,
-        };
-
-        let cache = SqliteCache::new(config).await.unwrap();
-        let test_data = create_test_processed_data();
-
-        let result = cache.store_power_data(&test_data).await;
-        assert!(result.is_ok());
-
-        let stats = cache.get_cache_stats().await.unwrap();
-        assert_eq!(stats.power_records_cached, 1);
-
-        // Cleanup
-        std::fs::remove_file("test_power_cache.db").ok();
-        std::fs::remove_file("test_power_archive.db").ok();
-    }
-
-    #[tokio::test]
-    async fn test_energy_data_types() {
-        let config = SqliteCacheConfig {
-            max_cache_size_mb: 100,
-            cache_db_path: "test_power_cache.db".to_string(),
-            archive_db_path: "test_power_archive.db".to_string(),
-            sync_batch_size: 100,
-            cleanup_threshold_days: 150,
-        };
-
-        let cache = SqliteCache::new(config).await.unwrap();
-        let test_data = create_test_energy_data();
-
-        let result = cache.store_energy_data(&test_data).await;
-        assert!(result.is_ok());
-
-        let stats = cache.get_cache_stats().await.unwrap();
-        assert_eq!(stats.energy_records_cached, 1);
-
-        // Cleanup
-        std::fs::remove_file("test_energy_cache.db").ok();
-        std::fs::remove_file("test_energy_archive.db").ok();
-    }
+    let stats = cache.get_cache_stats().await.unwrap();
+    assert_eq!(stats.power_records_cached, 1);
 }

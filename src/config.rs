@@ -212,7 +212,6 @@ impl DatabaseConfig {
 #[derive(Debug, Clone)]
 pub struct SqliteCacheConfig {
     pub cache_db_path: String,
-    pub archive_db_path: String,
     pub sync_batch_size: i64,
     pub max_cache_size_mb: u64,
     pub cleanup_threshold_days: i64,
@@ -223,8 +222,6 @@ impl Default for SqliteCacheConfig {
         Self {
             cache_db_path: env::var("SQLITE_CACHE_PATH")
                 .unwrap_or_else(|_| "data/cache.db".to_string()),
-            archive_db_path: env::var("SQLITE_ARCHIVE_PATH")
-                .unwrap_or_else(|_| "data/archive.db".to_string()),
             sync_batch_size: env::var("CACHE_SYNC_BATCH_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
