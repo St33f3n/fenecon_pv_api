@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::mqtt::SolarMqttClient;
+use crate::health::run_coordinator;
 use color_eyre::{Result, eyre::eyre};
 use tracing::{Level, debug, error, info, warn};
 use tracing_subscriber::FmtSubscriber;
@@ -11,6 +11,7 @@ mod calculator;
 mod collector;
 mod config;
 mod db;
+mod health;
 mod mqtt;
 
 #[cfg(test)]
@@ -20,7 +21,7 @@ mod test;
 async fn main() -> Result<()> {
     setup()?;
 
-    println!("Hello, world!");
+    run_coordinator().await?;
 
     return Ok(());
 }
@@ -39,6 +40,7 @@ fn setup() -> Result<()> {
     }
 
     setup_logging_env();
+
     Ok(())
 }
 

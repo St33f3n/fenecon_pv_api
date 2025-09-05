@@ -1,6 +1,7 @@
 use crate::calculator::{DataHistory, MqttPayload, ProcessedData, SensorValue};
 use crate::config::MqttConfig;
-use color_eyre::Result;
+use color_eyre::eyre::Error;
+use color_eyre::{Report, Result};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use serde_json::json;
 use std::sync::Arc;
@@ -35,6 +36,7 @@ impl Default for MQTTState {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct SolarMqttClient {
     pub client: AsyncClient,
     device_id: String,
@@ -43,7 +45,7 @@ pub struct SolarMqttClient {
 }
 
 impl SolarMqttClient {
-    pub async fn new(mqtt_config: MqttConfig, device_id: String) -> Result<Self> {
+    pub async fn new(mqtt_config: &MqttConfig, device_id: String) -> Result<Self> {
         let client_id = format!("{}_{}", mqtt_config.client_id_prefix, device_id);
         let mut mqttoptions = MqttOptions::new(client_id, &mqtt_config.broker_url, 1883);
         mqttoptions.set_keep_alive(Duration::from_secs(mqtt_config.keep_alive_secs));
@@ -128,7 +130,7 @@ impl SolarMqttClient {
             client,
             device_id,
             state,
-            config: mqtt_config,
+            config: mqtt_config.clone(),
         };
 
         Ok(mqtt_client)
@@ -152,7 +154,7 @@ impl SolarMqttClient {
         state_guard.clone()
     }
 
-    pub async fn publish_current_data(&self, data: &ProcessedData) {
+    pub async fn publish_current_data(&self, data: &ProcessedData) -> Result<()> {
         let topic = self.config.get_state_topic(&self.device_id, "power");
 
         match self
@@ -167,6 +169,7 @@ impl SolarMqttClient {
         {
             Ok(_) => {
                 debug!("Published power data successfully");
+                Ok(())
             }
             Err(e) => {
                 let mut state_guard = self.state.lock().await;
@@ -185,6 +188,7 @@ impl SolarMqttClient {
                     "Failed to publish power data"
                 );
                 drop(state_guard);
+                Err(Report::new(e))
             }
         }
     }

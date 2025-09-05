@@ -187,7 +187,7 @@ impl Default for PostgresState {
         }
     }
 }
-
+#[derive(Debug, Clone)]
 pub struct PostgresDatabase {
     pool: Option<PgPool>,
     state: Arc<Mutex<PostgresState>>,
@@ -474,6 +474,7 @@ pub struct CacheStats {
     pub energy_records_archived: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct SqliteCache {
     cache_pool: SqlitePool,
     config: SqliteCacheConfig,

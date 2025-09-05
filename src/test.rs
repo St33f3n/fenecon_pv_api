@@ -332,7 +332,7 @@ async fn test_mqtt() {
     let mqtt_user = config.mqtt_config.username.clone();
     let mqtt_pw = config.mqtt_config.password.clone();
     let device_id = "test_id".to_string();
-    let mqtt = SolarMqttClient::new(config.mqtt_config.clone(), device_id)
+    let mqtt = SolarMqttClient::new(&config.mqtt_config, device_id)
         .await
         .unwrap();
     let mut status = mqtt.get_health_status().await;
@@ -362,7 +362,7 @@ async fn test_discovery_mqtt() {
     let mqtt_user = config.mqtt_config.username.clone();
     let mqtt_pw = config.mqtt_config.password.clone();
     let device_id = "test_id".to_string();
-    let mqtt = SolarMqttClient::new(config.mqtt_config.clone(), device_id)
+    let mqtt = SolarMqttClient::new(&config.mqtt_config, device_id)
         .await
         .unwrap();
 
@@ -384,7 +384,7 @@ async fn test_filled_mqtt() {
     let mqtt_user = config.mqtt_config.username.clone();
     let mqtt_pw = config.mqtt_config.password.clone();
     let device_id = "test_id".to_string();
-    let mqtt = SolarMqttClient::new(config.mqtt_config.clone(), device_id)
+    let mqtt = SolarMqttClient::new(&config.mqtt_config, device_id)
         .await
         .unwrap();
 
