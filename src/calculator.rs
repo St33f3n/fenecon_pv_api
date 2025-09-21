@@ -3,6 +3,7 @@ use crate::config;
 use serde_json::json;
 use std::cmp::Ordering;
 use std::fmt;
+use tracing::warn;
 
 #[derive(Debug, Clone, Default)]
 pub struct ProcessedData {
@@ -191,6 +192,7 @@ impl DataHistory {
         let consumption_energy = raw_data.energy_data.consumption_energy;
         let battery_loaded = raw_data.energy_data.battery_loading;
         let battery_discharge = raw_data.energy_data.battery_discharge;
+        warn!("Batter loaded: {battery_loaded}");
         DataHistory {
             grid_buy,
             grid_sell,

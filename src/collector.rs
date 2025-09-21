@@ -1,6 +1,7 @@
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 const DC_POWER_PATH: &str = "_sum/ProductionDcActualPower";
 const PRODUCTION_POWER_PATH: &str = "_sum/ProductionActivePower";
@@ -10,8 +11,8 @@ const GRID_BUY_PATH: &str = "_sum/GridBuyActiveEnergy";
 const GRID_SELL_PATH: &str = "_sum/GridSellActiveEnergy";
 const BATTERY_STATE_PATH: &str = "_sum/EssSoc";
 const BATTERY_POWER_PATH: &str = "_sum/EssActivePower";
-const BATTERY_LOADING_PATH: &str = "_sum/EssActiveChargeEnergy";
-const BATTERY_DISCHARGE_PATH: &str = "_sum/EssActiveDischargeEnergy";
+const BATTERY_LOADING_PATH: &str = "_sum/EssDcChargeEnergy";
+const BATTERY_DISCHARGE_PATH: &str = "_sum/EssDcDischargeEnergy";
 pub const CONSUMPTION_POWER_PATH: &str = "_sum/ConsumptionActivePower";
 const CONSUMPTION_ENERGY_PATH: &str = "_sum/ConsumptionActiveEnergy";
 
@@ -147,7 +148,7 @@ impl RawPVData {
 
 pub async fn send_request(path: &str) -> Result<RawPVMessage> {
     let response = reqwest::get(path).await?.text().await?;
-    //debug!("{response}");
+    debug!("{response}");
     let response = serde_json::from_str(&response)?;
 
     Ok(response)
