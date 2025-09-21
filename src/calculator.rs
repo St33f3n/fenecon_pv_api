@@ -183,7 +183,8 @@ impl ProcessedData {
 impl DataHistory {
     pub fn process_raw(raw_data: RawPVData, config: &config::BatteryConfig) -> Self {
         let battery_cycles = (raw_data.energy_data.battery_discharge as f32
-            / (config.max_battery_energy as f32 * config.empty_threshold as f32))
+            / (config.max_battery_energy as f32
+                * ((100.0 - config.empty_threshold as f32) / 100.0)))
             as u16;
 
         let grid_buy = raw_data.energy_data.grid_buy;
