@@ -111,6 +111,8 @@ impl MqttPayload for ProcessedData {
             "supply_power": self.supply_state.power_value(),
             "battery_power": self.battery_status.battery_state.power_value(),
             "consumption": self.consumption,
+            "battery_percent": self.battery_status.battery_percent,
+            "battery_energy_wh": self.battery_status.battery_energy as i32,
             "battery_state": self.battery_status.battery_state.state_string(),
             "supply_state": self.supply_state.state_string(),
             "timestamp": chrono::Utc::now().to_rfc3339()

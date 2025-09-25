@@ -294,6 +294,26 @@ impl SolarMqttClient {
         )
         .await?;
 
+        self.create_sensor_config(
+            "battery_percent",
+            "Battery Charge Level",
+            "battery",
+            "%",
+            "measurement",
+            "{{ value_json.battery_percent }}",
+        )
+        .await?;
+
+        self.create_sensor_config(
+            "battery_energy_wh",
+            "Battery Energy Stored",
+            "energy_storage",
+            "Wh",
+            "measurement",
+            "{{ value_json.battery_energy_wh }}",
+        )
+        .await?;
+
         self.create_energy_sensor_config(
             "grid_buy",
             "Grid Energy Consumed",
