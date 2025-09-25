@@ -1,7 +1,7 @@
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, error};
 
 const DC_POWER_PATH: &str = "_sum/ProductionDcActualPower";
 const PRODUCTION_POWER_PATH: &str = "_sum/ProductionActivePower";
@@ -52,7 +52,7 @@ pub struct RawPVData {
     pub power_data: RawPowerData,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, PartialEq, Debug, Clone)]
 pub struct RawPowerData {
     pub dc_power: u16,
     pub production_power: u16,
@@ -61,7 +61,7 @@ pub struct RawPowerData {
     pub battery_power: i32,
     pub consumption_power: u16,
 }
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, PartialEq, Clone)]
 pub struct RawEnergyData {
     pub grid_buy: u64,
     pub grid_sell: u64,
@@ -76,9 +76,8 @@ impl RawPowerData {
         let mut raw_power_data = RawPowerData::default();
         for path in PATH_POWER_ARR {
             let url = format!("{:0}/{:1}", base_path, path);
-            if let Ok(response) = send_request(url.as_str()).await {
-                //                debug!("Value of {:0} is {:1}", response.address, response.value);
-                match response.address.as_str() {
+            match send_request(url.as_str()).await {
+                Ok(response) => match response.address.as_str() {
                     DC_POWER_PATH => raw_power_data.dc_power = response.value as u16,
                     PRODUCTION_POWER_PATH => {
                         raw_power_data.production_power = response.value as u16
@@ -90,11 +89,20 @@ impl RawPowerData {
                         raw_power_data.consumption_power = response.value as u16
                     }
                     _ => panic!("Should not be possible"),
+                },
+                Err(e) => {
+                    error!("No working HTTP-Request could be resieved: {e}");
+                    return Err(e);
                 }
             }
         }
-
+        if raw_power_data == RawPowerData::default() {
+            return Err(eyre!(
+                "No real data could be generated the http Request seams to be not working correctly"
+            ));
+        }
         raw_power_data.battery_power -= raw_power_data.dc_power as i32;
+
         Ok(raw_power_data)
     }
 }
@@ -104,8 +112,8 @@ impl RawEnergyData {
         let mut raw_energy_data = RawEnergyData::default();
         for path in PATH_ENERGY_ARR {
             let url = format!("{:0}/{:1}", base_path, path);
-            if let Ok(response) = send_request(url.as_str()).await {
-                match response.address.as_str() {
+            match send_request(url.as_str()).await {
+                Ok(response) => match response.address.as_str() {
                     PRODUCTION_ENERGY_PATH => {
                         raw_energy_data.production_energy = response.value as u64
                     }
@@ -119,8 +127,18 @@ impl RawEnergyData {
                         raw_energy_data.consumption_energy = response.value as u64
                     }
                     _ => panic!("Should not be possible"),
+                },
+
+                Err(e) => {
+                    error!("No working HTTP-Request could be resieved: {e}");
+                    return Err(e);
                 }
             }
+        }
+        if raw_energy_data == RawEnergyData::default() {
+            return Err(eyre!(
+                "No real data could be generated the http Request seams to be not working correctly"
+            ));
         }
 
         Ok(raw_energy_data)
