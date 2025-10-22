@@ -1,0 +1,22 @@
+[Unit]
+Description=Middleware-Service for Fenecon PV to MQTT and Postgress
+After=network.target
+
+[Service]
+Type=exec
+Restart=always
+RestartSec=300
+User=serviceman
+Group=serviceman
+WorkingDirectory=/home/serviceman/pv
+
+Environment=SOPS_AGE_KEY_FILE=/home/serviceman/.config/sops/age/keys.txt
+
+ExecStart=/usr/bin/nu startup.nu
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rust-service
+
+[Install]
+WantedBy=multi-user.target
